@@ -422,16 +422,6 @@ class LinkedRDKitChorizo:
         is_res_atom.extend([False] * (mol.GetNumAtoms() - n_atoms_before_addhs))
         return mol, is_res_atom, mapidx
 
-    @staticmethod
-    def expand_resid(resid_string):
-        chain, resnum = resid_string.strip().split(":")
-        if len(chain) > 1: raise ValueError(f"chain must be empty or single character, got {chain=}")
-        if len(resnum) == 0: raise ValueError(f"resnum can't be empty in {resid_string=}")
-        if resnum[-1].isalpha(): # PDB insertion code
-            insertion_code = resnum[-1]
-            resnum
-        return chain, resnum, icode
-
     def res_to_molsetup(self, res, mk_prep, is_protein_sidechain=False, cut_at_calpha=False):
         padded_mol, is_res_atom, mapidx = self.get_padded_mol(res)
         if is_protein_sidechain:
