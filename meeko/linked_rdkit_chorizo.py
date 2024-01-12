@@ -1032,7 +1032,7 @@ class ChorizoResidue:
         return not self.ignore_residue and not self.user_deleted
 
     @staticmethod
-    def chorizo_residue_object_hook(obj):
+    def chorizo_residue_json_decoder(obj):
         """
         Takes an object and attempts to decode it into a chorizo residue object.
 
