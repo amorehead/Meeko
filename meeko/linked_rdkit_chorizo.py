@@ -358,7 +358,7 @@ class LinkedRDKitChorizo:
         def _join(mol, pad_mol, pad_smarts_mol, rxn, is_res_atom, mapidx, adjacent_mol=None, pad_smarts_idxs=None):
             pad_matches = adjacent_mol.GetSubstructMatches(pad_smarts_mol)
             if len(pad_matches) != 1:
-                raise RuntimeError("expected 1 match but got %d" % (len(pad_matches)))
+                raise RuntimeError(f"expected 1 match but got {len(pad_matches)}, {resn=}")
             conformer = Chem.Conformer(pad_mol.GetNumAtoms())
             pad_mol.AddConformer(conformer)
             if adjacent_mol is not None:
@@ -447,10 +447,10 @@ class LinkedRDKitChorizo:
                 is_res = False
             molsetup.atom_ignore[atom_index] |= not is_res  # ignore padding atoms
             is_flex = is_protein_sidechain
+            is_flex &= is_res
             if cut_at_calpha and (atom_index != c_alpha) and (atom_index in bb_matches[0]):  # TODO bb pseudos
                 is_flex = False
             is_flexres_atom.append(is_flex)
-            chain, resname, resnum = res.split(":")
 
         # rectify charges to sum to integer (because of padding)
         net_charge = sum([atom.GetFormalCharge() for atom in self.residues[res].rdkit_mol.GetAtoms()])
@@ -463,10 +463,15 @@ class LinkedRDKitChorizo:
                 charges.append(q)
                 not_ignored_idxs.append(i)
         charges = rectify_charges(charges, net_charge, decimals=3)
-        pdbinfo = self.residues[res].molsetup.pdbinfo
+        chain, resname, resnum = res.split(":")
+        if self.residues[res].atom_names is None:
+            atom_names = ["" for _ in not_ignored_idxs]
+        else:
+            atom_names = self.residues[res].atom_names
         for i, j in enumerate(not_ignored_idxs):
             molsetup.charge[j] = charges[i]
-            molsetup.pdbinfo[j] = pdbinfo[mapidx[j]]
+            atom_name = atom_names[mapidx[j]]
+            molsetup.pdbinfo[j] = PDBAtomInfo(atom_name, resname, int(resnum), chain)
         return molsetup, mapidx, is_flexres_atom
 
     def flexibilize_protein_sidechain(self, res, mk_prep, cut_at_calpha=False):
@@ -622,7 +627,7 @@ class LinkedRDKitChorizo:
                 continue
 
             # if we can't generate an RDKit Mol for the residue, mark it as ignored and skip
-            pdbmol = Chem.MolFromPDBBlock(self.residues[res].pdb_text, removeHs=False)
+            pdbmol = Chem.MolFromPDBBlock(self.residues[res].pdb_text, removeHs=False) # TODO AltLoc ?
             if pdbmol is None:
                 self.residues[res].ignore_residue = True
                 continue
@@ -676,15 +681,19 @@ class LinkedRDKitChorizo:
         self.residues[res_id].rdkit_mol = resmol
         coords = resmol.GetConformer().GetPositions()
         atom_data = self.res_templates[resname]["atom_data"]
+        if "atom_name" in atom_data:
+            self.residues[res_id].set_atom_names(atom_data["atom_name"])
         chain, _, resnum = res_id.split(":")
-        molsetup, molsetup_mapidx, is_flexres_atom = self.build_molsetup(coords, atom_data, chain, resname, int(resnum))
+        atomic_nrs = [atom.GetAtomicNum() for atom in resmol.GetAtoms()]
+        molsetup, molsetup_mapidx, is_flexres_atom = self.build_molsetup(
+                coords, atom_data, chain, resname, int(resnum), atomic_nrs)
         self.residues[res_id].molsetup = molsetup
         self.residues[res_id].molsetup_mapidx = molsetup_mapidx
         self.residues[res_id].is_flexres_atom = is_flexres_atom
         return
 
     @staticmethod
-    def build_molsetup(coords, atom_data, chain, resn, resnum):
+    def build_molsetup(coords, atom_data, chain, resn, resnum, atomic_nrs):
 
         n = set([len(coords)] + [len(values) for (key, values) in atom_data.items()])
         if len(n) != 1:
@@ -709,6 +718,7 @@ class LinkedRDKitChorizo:
             else:
                 atom_name = ""
             molsetup.pdbinfo[i] = PDBAtomInfo(atom_name, resn, resnum, chain)
+            molsetup.element[i] = atomic_nrs[i]
 
         molsetup_mapidx = {i: i for i in range(n)}  # identity mapping (padded_mol == mol)
         is_flexres_atom = [False for i in range(n)]
@@ -777,7 +787,7 @@ class LinkedRDKitChorizo:
     def mk_parameterize_residue(self, res, mk_prep):
         molsetup, mapidx, is_flexres_atom = self.res_to_molsetup(res, mk_prep)
         self.residues[res].molsetup = molsetup
-        self.residues[res].mapidx = mapidx
+        self.residues[res].molsetup_mapidx = mapidx
         self.residues[res].is_flexres_atom = is_flexres_atom
         return
 
@@ -932,16 +942,11 @@ def add_rotamers_to_chorizo_molsetups(rotamer_states_list, chorizo):
             # next block is inefficient for large rotamer_states_list
             # refactored chorizos could help by having the following
             # data readily available
-            resmol = chorizo.residues[res_with_resname].rdkit_mol
             molsetup = chorizo.residues[res_with_resname].molsetup
-            mapidx = chorizo.residues[res_with_resname].molsetup_mapidx
-            mapidx_inv = {value: key for (key, value) in mapidx.items()}
             name_to_molsetup_idx = {}
-            for atom in resmol.GetAtoms():
-                props = atom.GetPropsAsDict()
-                if "atom_name" in props:
-                    atom_name = props["atom_name"]
-                    name_to_molsetup_idx[atom_name] = mapidx_inv[atom.GetIdx()]
+            for atom_index, pdbinfo in molsetup.pdbinfo.items():
+                atom_name = pdbinfo.name
+                name_to_molsetup_idx[atom_name] = atom_index
 
             resname = res_with_resname.split(":")[1]
             resname = rotamer_res_disambiguate.get(resname, resname)
@@ -1011,6 +1016,7 @@ class ChorizoResidue:
         self.next_id = next_id
 
         self.rdkit_mol = None
+        self.atom_names = None # assumes same order and length as atoms in rdkit_mol
         self.molsetup = None
         self.molsetup_mapidx = None
         self.is_flexres_atom = None  # Check about these data types/Do we want the default to be None or empty
@@ -1022,12 +1028,23 @@ class ChorizoResidue:
 
         self.additional_connections = []
 
+    def set_atom_names(self, atom_names_list):
+        if self.rdkit_mol is None:
+            raise RuntimeError("can't set atom_names if rdkit_mol is not set yet")
+        if len(atom_names_list) != self.rdkit_mol.GetNumAtoms():
+            raise ValueError(f"{len(atom_names_list)=} differs from {self.rdkit_mol.GetNumAtoms()=}")
+        name_types = set([type(name) for name in atom_names_list])
+        if name_types != {str}:
+            raise ValueError(f"atom names must be str but {name_types=}")
+        self.atom_names = atom_names_list
+        return
+
     def to_json(self):
         return json.dumps(self, cls=ChorizoResidueEncoder)
 
     @classmethod
     def from_json(cls, json_string):
-        residue = json.loads(json_string, object_hook=cls.chorizo_residue_json_decoder) 
+        residue = json.loads(json_string, object_hook=cls.chorizo_residue_json_decoder)
         return residue
 
     def is_valid_residue(self):
